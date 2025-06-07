@@ -1,0 +1,355 @@
+// © 666
+//@private
+//@author xyz
+
+//@version=6
+indicator('FVG 666', '666', overlay = true, max_lines_count = 500, max_boxes_count = 500)
+//------------------------------------------------------------------------------
+//设置
+//-----------------------------------------------------------------------------{
+thresholdPer = input.float(0, 'Threshold %', minval = 0, maxval = 100, step = .1, inline = 'threshold')
+auto = input(false, 'Auto', inline = 'threshold')
+
+showLast = input.int(0, 'Unmitigated Levels', minval = 0)
+mitigationLevels = input.bool(false, 'Mitigation Levels')
+
+tf = input.timeframe('', 'Timeframe')
+
+//样式
+extend = input.int(20, 'Extend', minval = 0, inline = 'extend', group = 'Style')
+dynamic = input(false, 'Dynamic', inline = 'extend', group = 'Style')
+
+bullCss = input.color(color.new(#089981, 70), 'Bullish FVG', group = 'Style')
+bearCss = input.color(color.new(#f23645, 70), 'Bearish FVG', group = 'Style')
+
+//仪表盘
+showDash = input(false, 'Show Dashboard', group = 'Dashboard')
+dashLoc = input.string('Top Right', 'Location', options = ['Top Right', 'Bottom Right', 'Bottom Left'], group = 'Dashboard')
+textSize = input.string('Small', 'Size', options = ['Tiny', 'Small', 'Normal'], group = 'Dashboard')
+
+//-----------------------------------------------------------------------------}
+//用户定义类型
+//-----------------------------------------------------------------------------{
+type fvg
+	float max
+	float min
+	bool isbull
+	int t = time
+
+//-----------------------------------------------------------------------------}
+//方法/函数
+//-----------------------------------------------------------------------------{
+n = bar_index
+
+method tosolid(color id) =>
+    color.rgb(color.r(id), color.g(id), color.b(id))
+
+// 添加时间周期识别函数
+getTimeframeLabel(tf) =>
+    if tf == "60"
+        "1H FVG"
+    else if tf == "240"
+        "4H FVG"
+    else if tf == "D" or tf == "1D"
+        "D FVG"
+    else if tf == "W" or tf == "1W"
+        "W FVG"
+    else
+        tf + " FVG"
+
+detect() =>
+    var new_fvg = fvg.new(na, na, bool(na), na)
+    threshold = auto ? ta.cum((high - low) / low) / bar_index : thresholdPer / 100
+
+    bull_fvg = low > high[2] and close[1] > high[2] and (low - high[2]) / high[2] > threshold
+    bear_fvg = high < low[2] and close[1] < low[2] and (low[2] - high) / high > threshold
+
+    if bull_fvg
+        new_fvg := fvg.new(low, high[2], true, time[2])
+        new_fvg
+    else if bear_fvg
+        new_fvg := fvg.new(low[2], high, false, time[2])
+        new_fvg
+
+    [bull_fvg, bear_fvg, new_fvg]
+
+//-----------------------------------------------------------------------------}
+//FVG检测/显示
+//-----------------------------------------------------------------------------{
+var float max_bull_fvg = na
+var float min_bull_fvg = na
+var bull_count = 0
+var bull_mitigated = 0
+var float max_bear_fvg = na
+var float min_bear_fvg = na
+var bear_count = 0
+var bear_mitigated = 0
+var t = 0
+
+var fvg_records = array.new<fvg>(0)
+var fvg_areas = array.new<box>(0)
+var fvg_labels = array.new<label>(0)
+
+var extend_length = 60 * 24 * 60 * 60 * 1000  // 2个月的毫秒数
+// 计算FVG延伸长度
+getExtendLength(fvg_time) =>
+    time_diff = time - fvg_time
+    time_diff > extend_length ? 4 : n
+
+// 获取当前图表的时间周期
+current_tf = timeframe.period
+// 根据当前时间周期决定要显示的时间周期
+var display_tf = array.new_string(0)
+if current_tf == "5" or current_tf == "15"
+    array.clear(display_tf)
+    array.push(display_tf, "60")  // 1小时
+    array.push(display_tf, "240")  // 4小时
+    array.push(display_tf, "1D")  // 日线
+    array.push(display_tf, "1W")  // 周线
+else if current_tf == "30"
+    array.clear(display_tf)
+    array.push(display_tf, "60")  // 1小时
+    array.push(display_tf, "240")  // 4小时
+    array.push(display_tf, "1D")  // 日线
+else if current_tf == "60"
+    array.clear(display_tf)
+    array.push(display_tf, "60")  // 1小时
+    array.push(display_tf, "240")  // 4小时
+else if current_tf == "240"
+    array.clear(display_tf)
+    array.push(display_tf, "240")  // 4小时
+    array.push(display_tf, "1D")  // 日线
+else if current_tf == "D" or current_tf == "1D"
+    array.clear(display_tf)
+    array.push(display_tf, "1D")  // 日线
+    array.push(display_tf, "1W")  // 周线
+else if current_tf == "W" or current_tf == "1W"
+    array.clear(display_tf)
+    array.push(display_tf, "1W")  // 周线
+else
+    array.clear(display_tf)
+    array.push(display_tf, tf)
+
+// 声明变量
+var bool bull_fvg = false
+var bool bear_fvg = false
+var fvg new_fvg = fvg.new(na, na, bool(na), na)
+var string current_tf_label = na
+
+// 使用request.security获取大时间周期的FVG
+if array.size(display_tf) > 1
+    var fvg_data = array.new<fvg>(0)
+    array.clear(fvg_data)
+    
+    // 获取所有时间周期的FVG数据
+    for i = 0 to array.size(display_tf) - 1
+        var string tf_str = na
+        tf_str := array.get(display_tf, i)
+        tf_str := tf_str == "D" ? "1D" : tf_str == "W" ? "1W" : tf_str
+        [bull, bear, new] = request.security(syminfo.tickerid, tf_str, detect(), lookahead=barmerge.lookahead_off)
+        if bull or bear
+            array.push(fvg_data, new)
+            current_tf_label := getTimeframeLabel(array.get(display_tf, i))
+    
+    // 合并所有时间周期的FVG信号
+    bull_fvg := false
+    bear_fvg := false
+    new_fvg := fvg.new(na, na, bool(na), na)
+    
+    // 按时间周期优先级处理FVG
+    if array.size(fvg_data) > 0
+        new_fvg := array.get(fvg_data, 0)
+        bull_fvg := new_fvg.isbull
+        bear_fvg := not new_fvg.isbull
+else
+    var string tf_str = na
+    tf_str := array.get(display_tf, 0)
+    tf_str := tf_str == "D" ? "1D" : tf_str == "W" ? "1W" : tf_str
+    [bull, bear, new] = request.security(syminfo.tickerid, tf_str, detect(), lookahead=barmerge.lookahead_off)
+    bull_fvg := bull
+    bear_fvg := bear
+    new_fvg := new
+    current_tf_label := getTimeframeLabel(array.get(display_tf, 0))
+
+//看涨FVG
+if bull_fvg and new_fvg.t != t
+    if dynamic
+        max_bull_fvg := new_fvg.max
+        min_bull_fvg := new_fvg.min
+        min_bull_fvg
+
+    //填充FVG数组
+    if not dynamic
+        var box new_box = na
+        // 计算当前视图末尾的时间
+        visible_end = time + (timeframe.in_seconds() * 1000)  // 当前K线的结束时间
+        new_box := box.new(new_fvg.t, new_fvg.max, visible_end, new_fvg.min, bgcolor = bullCss, xloc = xloc.bar_time)
+        fvg_areas.unshift(new_box)
+        new_label = label.new(n + 8, new_fvg.min + (new_fvg.max - new_fvg.min) * 0.5, current_tf_label, color = na, textcolor = bullCss.tosolid(), style = label.style_label_down)
+        array.unshift(fvg_labels, new_label)
+        fvg_records.unshift(new_fvg)
+
+    bull_count := bull_count + 1
+    t := new_fvg.t
+    t
+else if dynamic
+    max_bull_fvg := math.max(math.min(close, max_bull_fvg), min_bull_fvg)
+    max_bull_fvg
+
+//看跌FVG
+if bear_fvg and new_fvg.t != t
+    if dynamic
+        max_bear_fvg := new_fvg.max
+        min_bear_fvg := new_fvg.min
+        min_bear_fvg
+
+    //填充FVG数组
+    if not dynamic
+        var box new_box = na
+        // 计算当前视图末尾的时间
+        visible_end = time + (timeframe.in_seconds() * 1000)  // 当前K线的结束时间
+        new_box := box.new(new_fvg.t, new_fvg.max, visible_end, new_fvg.min, bgcolor = bearCss, xloc = xloc.bar_time)
+        fvg_areas.unshift(new_box)
+        new_label = label.new(n + 8, new_fvg.min + (new_fvg.max - new_fvg.min) * 0.5, current_tf_label, color = na, textcolor = bearCss.tosolid(), style = label.style_label_down)
+        array.unshift(fvg_labels, new_label)
+        fvg_records.unshift(new_fvg)
+
+    bear_count := bear_count + 1
+    t := new_fvg.t
+    t
+else if dynamic
+    min_bear_fvg := math.min(math.max(close, min_bear_fvg), max_bear_fvg)
+    min_bear_fvg
+
+// 更新FVG区域
+updateFVGAreas() =>
+    if array.size(fvg_areas) > 0
+        for i = 0 to array.size(fvg_areas) - 1
+            current_area = array.get(fvg_areas, i)
+            current_fvg = array.get(fvg_records, i)
+            if not na(current_fvg)
+                time_diff = time - current_fvg.t
+                
+                // 检查FVG是否在当前可视范围内
+                visible_start = time - (timeframe.in_seconds() * 500 * 1000)  // 当前时间往前500根K线
+                visible_end = time + (timeframe.in_seconds() * 1000)    // 当前K线的结束时间
+                
+                if current_fvg.t >= visible_start and current_fvg.t <= visible_end
+                    if time_diff > extend_length
+                        // 超过两个月，固定宽度为10根K线
+                        current_area.set_right(current_fvg.t + (10 * timeframe.in_seconds() * 1000))
+                    else
+                        // 未超过两个月，延伸到当前K线
+                        current_area.set_right(visible_end)
+                else
+                    // 不在可视范围内，隐藏FVG
+                    current_area.set_right(current_fvg.t)
+
+// 在每次K线更新时调用updateFVGAreas
+if barstate.islast
+    updateFVGAreas()
+
+//-----------------------------------------------------------------------------}
+//未关闭/已关闭的线
+//-----------------------------------------------------------------------------{
+//测试是否关闭
+if fvg_records.size() > 0
+    for i = fvg_records.size() - 1 to 0 by 1
+        get = fvg_records.get(i)
+
+        if get.isbull
+            if close < get.min
+                //如果已关闭则显示线
+                if mitigationLevels
+                    line.new(get.t, get.min, time, get.min, xloc.bar_time, color = bullCss, style = line.style_dashed)
+
+                //删除框和标签
+                if not dynamic
+                    area = fvg_areas.remove(i)
+                    area.delete()
+                    if array.size(fvg_labels) > i
+                        label.delete(array.get(fvg_labels, i))
+                        array.remove(fvg_labels, i)
+
+                fvg_records.remove(i)
+                bull_mitigated := bull_mitigated + 1
+                bull_mitigated
+        else if close > get.max
+            //如果已关闭则显示线
+            if mitigationLevels
+                line.new(get.t, get.max, time, get.max, xloc.bar_time, color = bearCss, style = line.style_dashed)
+
+            //删除框和标签
+            if not dynamic
+                area = fvg_areas.remove(i)
+                area.delete()
+                if array.size(fvg_labels) > i
+                    label.delete(array.get(fvg_labels, i))
+                    array.remove(fvg_labels, i)
+
+            fvg_records.remove(i)
+            bear_mitigated := bear_mitigated + 1
+            bear_mitigated
+
+//未关闭的线
+var unmitigated = array.new<line>(0)
+
+//移除未关闭的线
+if barstate.islast and showLast > 0 and fvg_records.size() > 0
+    if unmitigated.size() > 0
+        for element in unmitigated
+            element.delete()
+        unmitigated.clear()
+
+    for i = 0 to math.min(showLast - 1, fvg_records.size() - 1) by 1
+        get = fvg_records.get(i)
+
+        unmitigated.push(line.new(get.t, get.isbull ? get.min : get.max, time, get.isbull ? get.min : get.max, xloc.bar_time, color = get.isbull ? bullCss : bearCss))
+
+//-----------------------------------------------------------------------------}
+//仪表盘
+//-----------------------------------------------------------------------------{
+var table_position = dashLoc == 'Bottom Left' ? position.bottom_left : dashLoc == 'Top Right' ? position.top_right : position.bottom_right
+
+var table_size = textSize == 'Tiny' ? size.tiny : textSize == 'Small' ? size.small : size.normal
+
+var tb = table.new(table_position, 3, 3, bgcolor = #1e222d, border_color = #373a46, border_width = 1, frame_color = #373a46, frame_width = 1)
+
+if showDash
+    if barstate.isfirst
+        tb.cell(1, 0, 'Bullish', text_color = bullCss.tosolid(), text_size = table_size)
+        tb.cell(2, 0, 'Bearish', text_color = bearCss.tosolid(), text_size = table_size)
+
+        tb.cell(0, 1, 'Count', text_size = table_size, text_color = color.white)
+        tb.cell(0, 2, 'Mitigated', text_size = table_size, text_color = color.white)
+
+    if barstate.islast
+        tb.cell(1, 1, str.tostring(bull_count), text_color = bullCss.tosolid(), text_size = table_size)
+        tb.cell(2, 1, str.tostring(bear_count), text_color = bearCss.tosolid(), text_size = table_size)
+
+        tb.cell(1, 2, str.tostring(bull_mitigated / bull_count * 100, format.percent), text_color = bullCss.tosolid(), text_size = table_size)
+        tb.cell(2, 2, str.tostring(bear_mitigated / bear_count * 100, format.percent), text_color = bearCss.tosolid(), text_size = table_size)
+
+//-----------------------------------------------------------------------------}
+//绘图
+//-----------------------------------------------------------------------------{
+//动态看涨FVG
+max_bull_plot = plot(max_bull_fvg, color = na)
+min_bull_plot = plot(min_bull_fvg, color = na)
+fill(max_bull_plot, min_bull_plot, color = bullCss)
+
+//动态看跌FVG
+max_bear_plot = plot(max_bear_fvg, color = na)
+min_bear_plot = plot(min_bear_fvg, color = na)
+fill(max_bear_plot, min_bear_plot, color = bearCss)
+
+//-----------------------------------------------------------------------------}
+//警报
+//-----------------------------------------------------------------------------{
+alertcondition(bull_count > bull_count[1], 'Bullish FVG', 'Bullish FVG detected')
+alertcondition(bear_count > bear_count[1], 'Bearish FVG', 'Bearish FVG detected')
+
+alertcondition(bull_mitigated > bull_mitigated[1], 'Bullish FVG Mitigation', 'Bullish FVG mitigated')
+alertcondition(bear_mitigated > bear_mitigated[1], 'Bearish FVG Mitigation', 'Bearish FVG mitigated')
+
+//-----------------------------------------------------------------------------}
