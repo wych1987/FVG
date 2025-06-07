@@ -1,0 +1,123 @@
+//@version=6
+strategy("FVG Multi-Timeframe Strategy", overlay=true, margin_long=100, margin_short=100, pyramiding=1, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// 策略参数
+thresholdPer = input.float(0.5, 'FVG Threshold %', minval=0, maxval=100, step=0.1)
+riskRewardRatio = input.float(2.0, 'Risk/Reward Ratio', minval=1.0, step=0.1)
+maxTradeDuration = input.int(100, 'Max Trade Duration (bars)', minval=10)
+useStoploss = input.bool(true, 'Use Stop Loss/Take Profit')
+
+// FVG数据结构
+type FVGData
+    int fvgTime
+    float fvgLow
+    float fvgHigh
+    bool isBull
+    string tf
+
+// 检测FVG函数
+detectFVG(tf) =>
+    threshold = thresholdPer / 100
+    
+    bull_condition = low > high[2] and close[1] > high[2] and (low - high[2]) / high[2] > threshold
+    bear_condition = high < low[2] and close[1] < low[2] and (low[2] - high) / high > threshold
+    
+    fvg_time = time[2]
+    fvg_low = bear_condition ? low[2] : low
+    fvg_high = bull_condition ? high[2] : high
+    
+    [bull_result, bear_result] = request.security(syminfo.tickerid, tf, [bull_condition, bear_condition], lookahead=barmerge.lookahead_off)
+    [fvg_time_result, fvg_low_result, fvg_high_result] = request.security(syminfo.tickerid, tf, [fvg_time, fvg_low, fvg_high], lookahead=barmerge.lookahead_off)
+    
+    [bull_result, bear_result, fvg_time_result, fvg_low_result, fvg_high_result]
+
+// 获取多时间周期FVG
+timeframes = array.from("60", "240", "D", "W")
+var fvgArray = array.new<FVGData>()
+
+for tf in timeframes
+    [bull, bear, fvg_time, fvg_low, fvg_high] = detectFVG(tf)
+    if bull or bear
+        fvgData = FVGData.new(fvg_time, fvg_low, fvg_high, bull, tf)
+        array.push(fvgArray, fvgData)
+
+// 交易逻辑
+var tradeActive = false
+var entryPrice = 0.0
+var entryTime = 0
+
+// 确保数组不为空且barstate已确认
+if array.size(fvgArray) > 0 and not tradeActive and barstate.isconfirmed
+    // 获取最近的FVG
+    fvg = array.get(fvgArray, 0)
+    fvgTime = fvg.fvgTime
+    fvgLow = fvg.fvgLow
+    fvgHigh = fvg.fvgHigh
+    isBull = fvg.isBull
+    tfLabel = fvg.tf
+    
+    // 多头入场条件（看涨FVG）
+    if isBull and close > fvgHigh
+        strategy.entry("Long", strategy.long, comment="Bull FVG " + tfLabel + " Time: " + str.tostring(fvgTime) + " Range: " + str.tostring(fvgLow) + "-" + str.tostring(fvgHigh))
+        tradeActive := true
+        entryPrice := close
+        entryTime := time
+        
+    // 空头入场条件（看跌FVG）
+    if not isBull and close < fvgLow
+        strategy.entry("Short", strategy.short, comment="Bear FVG " + tfLabel + " Time: " + str.tostring(fvgTime) + " Range: " + str.tostring(fvgLow) + "-" + str.tostring(fvgHigh))
+        tradeActive := true
+        entryPrice := close
+        entryTime := time
+
+// 出场逻辑
+if tradeActive and strategy.position_size != 0
+    // 计算止损止盈
+    atr = ta.atr(14)
+    longStop = entryPrice - atr
+    longProfit = entryPrice + (atr * riskRewardRatio)
+    shortStop = entryPrice + atr
+    shortProfit = entryPrice - (atr * riskRewardRatio)
+    
+    // 时间退出（最大持仓时间）
+    timeExit = time - entryTime > maxTradeDuration * timeframe.in_seconds() * 1000
+    
+    // 多头出场
+    if strategy.position_size > 0
+        if useStoploss
+            strategy.exit("XL", "Long", stop=longStop, limit=longProfit)
+        if close < longStop or timeExit
+            strategy.close("Long")
+            tradeActive := false
+    
+    // 空头出场
+    if strategy.position_size < 0
+        if useStoploss
+            strategy.exit("XS", "Short", stop=shortStop, limit=shortProfit)
+        if close > shortStop or timeExit
+            strategy.close("Short")
+            tradeActive := false
+
+// 当没有持仓时重置交易状态
+if strategy.position_size == 0
+    tradeActive := false
+
+// 绘制FVG区域 - 添加边界检查
+if array.size(fvgArray) > 0
+    for i = 0 to math.min(array.size(fvgArray) - 1, 4) // 最多显示5个FVG
+        if i < array.size(fvgArray) // 额外的边界检查
+            fvg = array.get(fvgArray, i)
+            fvgTime = fvg.fvgTime
+            fvgLow = fvg.fvgLow
+            fvgHigh = fvg.fvgHigh
+            isBull = fvg.isBull
+            tfLabel = fvg.tf
+            
+            endTime = fvgTime + (timeframe.in_seconds() * 1000 * 100) // 延伸100根K线
+            boxColor = isBull ? color.new(color.green, 80) : color.new(color.red, 80)
+            
+            box.new(fvgTime, fvgHigh, endTime, fvgLow, bgcolor=boxColor, border_color=isBull ? color.green : color.red, xloc=xloc.bar_time)
+
+// 清除过期FVG（保留最近5个）
+if array.size(fvgArray) > 5
+    array.remove(fvgArray, array.size(fvgArray) - 1)
